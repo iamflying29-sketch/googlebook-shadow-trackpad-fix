@@ -6,8 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SDK=$HOME/tools/android-sdk
 JAR=$SDK/platforms/android-35/android.jar
-mkdir -p build/classes
-javac -Xlint:-options -source 11 -target 11 -cp "$JAR" -d build/classes KeyTest.java
-"$SDK/build-tools/35.0.0/d8" --min-api 33 --lib "$JAR" --output build $(find build/classes -name '*.class')
-mv build/classes.dex keytest.dex
+# A fresh build folder each time (nothing is ever deleted).
+B=build/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$B/classes"
+javac -Xlint:-options -source 11 -target 11 -cp "$JAR" -d $B/classes KeyTest.java
+"$SDK/build-tools/35.0.0/d8" --min-api 33 --lib "$JAR" --output "$B" $(find $B/classes -name '*.class')
+mv $B/classes.dex keytest.dex
 echo "Built $(pwd)/keytest.dex"

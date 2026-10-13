@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the test tools from the CURRENT helper sources (never changes them): copies them, swaps
 # the clock for a controllable one, adds a dry-run event validator, compiles to classes.dex.
-#   build-fuzz.sh && adb push /tmp/shadowtrackpad-fuzz-build/classes.dex /data/local/tmp/fuzz.dex
+#   adb push "$(build-fuzz.sh | tail -1)" /data/local/tmp/fuzz.dex
 #   adb shell CLASSPATH=/data/local/tmp/fuzz.dex app_process / local.shadowtrackpad.<Test> ...
 #     Fuzz N SEED          random finger/click/timing sequences through Engine + Injector; checks
 #                          every event and that nothing is ever left held (keys, buttons, drags)
@@ -12,10 +12,11 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$HERE/../../helper/src/local/shadowtrackpad
-B=/tmp/shadowtrackpad-fuzz-build
+# A fresh build folder each time (nothing is ever deleted). The script prints the path of classes.dex.
+B=/tmp/shadowtrackpad-fuzz-build/$(date +%Y%m%d-%H%M%S)
 SDK=$HOME/tools/android-sdk
 JAR=$SDK/platforms/android-35/android.jar
-rm -rf "$B" && mkdir -p "$B/src/local/shadowtrackpad" "$B/cls"
+mkdir -p "$B/src/local/shadowtrackpad" "$B/cls"
 cp "$SRC"/*.java "$HERE/Fuzz.java" "$HERE/ParserFuzz.java" "$HERE/SecurityTest.java" "$HERE/Clock.java" "$B/src/local/shadowtrackpad/"
 cd "$B/src/local/shadowtrackpad"
 sed -i 's/SystemClock\.uptimeMillis()/Clock.uptime()/g; s/SystemClock\.sleep(/Clock.sleep(/g' Engine.java Injector.java

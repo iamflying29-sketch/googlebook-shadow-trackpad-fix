@@ -179,7 +179,7 @@ In my final doctor run, all 25 checks passed.
 
 ### Testing
 
-Before I called it done, the code went through three rounds of independent code review. I also wrote a test harness
+Before I called it done, the code went through three rounds of independent review by AI code reviewers. I also wrote a test harness
 (`tools/fuzz`) that builds the real engine, injector and parser with a controllable clock and an event validator. It
 ran more than one million random gesture sequences through the engine with zero violations and zero stuck keys or
 buttons, and hundreds of thousands of sequences through a model of the kernel's multitouch reporting, also without a
@@ -603,17 +603,19 @@ adb logcat -s TrackpadProbe:I
 | `tools/fuzz/` | Test harness: `build-fuzz.sh`, `hooks.py`, `Fuzz`, `ParserFuzz`, `SecurityTest`, `Clock` |
 | `LICENSE` | MIT License |
 
-Build outputs, keystores and keys are excluded by `.gitignore` and are never part of this repository.
+Each build script writes into a new dated folder under its own `build/` folder and never deletes anything, so old
+build folders stay until you remove them yourself. Build outputs, keystores and keys are excluded by `.gitignore` and
+are never part of this repository.
 
 ### Running the test harness
 
 The harness runs on the Googlebook, because the engine needs Android's framework classes. `build-fuzz.sh` copies the
-current helper sources to `/tmp/shadowtrackpad-fuzz-build`, swaps in the controllable clock and the validator, and
-compiles them. It never changes the real sources. The tests are CPU heavy, so start with a small number of sequences:
+current helper sources to a new dated folder under `/tmp/shadowtrackpad-fuzz-build`, swaps in the controllable clock
+and the validator, and compiles them. It prints the path of the finished `classes.dex`, and it never changes the real
+sources. The tests are CPU heavy, so start with a small number of sequences:
 
 ```bash
-~/googlebook-shadow-trackpad-fix/tools/fuzz/build-fuzz.sh
-adb push /tmp/shadowtrackpad-fuzz-build/classes.dex /data/local/tmp/fuzz.dex
+adb push "$(~/googlebook-shadow-trackpad-fix/tools/fuzz/build-fuzz.sh | tail -1)" /data/local/tmp/fuzz.dex
 adb shell CLASSPATH=/data/local/tmp/fuzz.dex app_process / local.shadowtrackpad.Fuzz 10000 1
 adb shell CLASSPATH=/data/local/tmp/fuzz.dex app_process / local.shadowtrackpad.ParserFuzz 10000 1
 adb shell CLASSPATH=/data/local/tmp/fuzz.dex app_process / local.shadowtrackpad.SecurityTest
