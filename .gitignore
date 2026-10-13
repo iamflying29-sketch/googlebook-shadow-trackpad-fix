@@ -1,0 +1,30 @@
+# Build outputs
+build/
+*.apk
+*.idsig
+*.dex
+*.class
+res.zip
+# app/build.sh copies helper/device/start.sh into the APK's assets on every build
+app/assets/
+
+# Signing keystores and adb keys (never commit these)
+*.jks
+*.keystore
+*.p12
+*.pem
+*.pass
+adbkey*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Logs
+*.log
+
+# Browser profiles
+profile/
+profiles/

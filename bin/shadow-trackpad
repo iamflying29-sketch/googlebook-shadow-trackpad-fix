@@ -1,0 +1,272 @@
+#!/bin/bash
+# Shadow Trackpad Fix - control script (runs in the Linux Terminal VM, drives the Googlebook via adb).
+# The "Shadow Trackpad Fix" app on the Googlebook starts the helper by itself after every reboot
+# and checks it every 15 minutes; this script is for control, tuning and diagnostics.
+#
+#   shadow-trackpad status           what the helper is doing right now
+#   shadow-trackpad start|stop|restart
+#   shadow-trackpad log [-f]         show (or follow) the helper's log
+#   shadow-trackpad pause|resume     temporarily give the trackpad back to Shadow's normal handling
+#   shadow-trackpad set KEY VALUE    change a setting (e.g. set scroll_speed 1.5); applied within 2 s
+#   shadow-trackpad config           show settings
+#   shadow-trackpad nettest          (during a Shadow session) network round-trip/jitter + helper latency
+#   shadow-trackpad doctor           re-verify everything after a Shadow or Android update
+#   shadow-trackpad install-app [--force]  rebuild + reinstall the app (keeps its pairing)
+#   shadow-trackpad pair [--force]   re-pair the app's adb key (only if its pairing was removed)
+#                                    (--force: the app was reinstalled/cleared, skip the device check)
+#   shadow-trackpad connect [IP:PORT] connect adb (default: the port the app publishes in Documents)
+#   shadow-trackpad verbose          toggle detailed gesture logging
+#
+# Environment: GOOGLEBOOK_IP (your Googlebook's Wi-Fi IP address, used to find its adb connection),
+# ANDROID_USER_ID (your Android user ID, default 10), SHADOW_TRACKPAD_DOCS (where the Linux
+# Terminal sees the app's "Documents/Shadow Trackpad Fix" folder).
+set -euo pipefail
+
+# The repository this script belongs to (a symlink in ~/.local/bin is followed back to it).
+REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+HELPER_SRC=$REPO/helper
+APP_SRC=$REPO/app
+TOOLS=$REPO/tools
+APP=local.shadowtrackpadfix
+DIR=/data/local/tmp/shadowtrackpad
+DOCS="${SHADOW_TRACKPAD_DOCS:-/mnt/shared/Documents/Shadow Trackpad Fix}"
+KEYDIR=$HOME/.config/shadow-trackpad/adbhome
+USER_ID="${ANDROID_USER_ID:-10}"
+[[ "$USER_ID" =~ ^[0-9]+$ ]] || { echo "ANDROID_USER_ID must be a number (see: adb shell am get-current-user)" >&2; exit 1; }
+GOOGLEBOOK_IP="${GOOGLEBOOK_IP:-}"
+FORCE=0
+[ "${2:-}" = "--force" ] && FORCE=1
+
+# Secret shared with the app, derived from the paired private key that only the two of them hold
+# (SHA-256 of a deterministic RSA signature of a fixed label - same as the app's Starter.keySecret).
+key_secret() {
+    [ -r "$KEYDIR/adbkey" ] || return 1
+    printf 'shadowtrackpadfix-v1' | openssl dgst -sha256 -sign "$KEYDIR/adbkey" -binary 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+hmac_hex() { python3 -I -c 'import hmac,hashlib,sys; print(hmac.new(bytes.fromhex(sys.argv[1]), sys.argv[2].encode(), hashlib.sha256).hexdigest())' "$1" "$2"; }
+
+# The Googlebook's adb address as published by the app (Wireless debugging's port changes on
+# reboot). Only files carrying the app's signature count, so another app can't plant an address;
+# Android may have given the app's file a numbered name, so all adb-port*.txt are checked.
+published() {
+    local k f addr mac t best="" bestt=-1
+    k=$(key_secret) || return 0
+    [ -n "$k" ] || return 0
+    for f in "$DOCS"/adb-port*.txt; do
+        [ -r "$f" ] || continue
+        addr="" mac=""
+        read -r addr mac < "$f" || true
+        [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]{1,5}$ ]] || continue
+        [ -n "$mac" ] && [ "$(hmac_hex "$k" "port:$addr")" = "$mac" ] || continue
+        t=$(stat -c %Y "$f")
+        if [ "$t" -gt "$bestt" ]; then best=$addr; bestt=$t; fi
+    done
+    echo "$best"
+}
+connected() { adb devices 2>/dev/null | awk -v s="$1" 'NR>1 && $1==s && $2=="device" {print $1}'; }
+
+device() {
+    # Prefer the published Googlebook address, so another adb device (e.g. Waydroid) or a stale
+    # connection never receives these commands.
+    if [ -n "${PUB:-}" ] && [ -n "$(connected "$PUB")" ]; then echo "$PUB"; return; fi
+    # Otherwise only a connection to the Googlebook's own IP address (GOOGLEBOOK_IP, or the IP
+    # address the app published) is used.
+    local pub="${PUB:-}"
+    local ip="${GOOGLEBOOK_IP:-${pub%:*}}"
+    [ -n "$ip" ] || return 0
+    adb devices 2>/dev/null | awk -v ip="$ip" 'NR>1 && $2=="device" && index($1, ip ":") == 1 && substr($1, length(ip) + 2) ~ /^[0-9]+$/ {print $1}' | head -1
+}
+
+need_device() {
+    PUB=$(published)
+    DEV=$(device || true)
+    if [ "$DEV" != "$PUB" ] && [ -n "$PUB" ] && [ -z "$(connected "$PUB")" ]; then
+        # The app republishes Wireless debugging's current IP:port after every reboot.
+        adb connect "$PUB" >/dev/null 2>&1 || true
+        sleep 1
+        DEV=$(device || true)
+    fi
+    if [ -z "$DEV" ]; then
+        echo "Not connected to the Googlebook." >&2
+        echo "Make sure Wireless debugging is on (Settings > System > Developer options), then run:" >&2
+        echo "  shadow-trackpad connect IP:PORT    (IP & port are shown on the Wireless debugging screen)" >&2
+        [ -n "$GOOGLEBOOK_IP" ] || echo "Also set GOOGLEBOOK_IP to your Googlebook's IP address (see the README)." >&2
+        exit 1
+    fi
+}
+
+ash() { adb -s "$DEV" shell "$@"; }
+# Same code location rules as start.sh: the app's APK, else the fallback dex.
+helper() {
+    local out
+    out=$(ash "A=\$(pm path --user current $APP 2>/dev/null | head -1 | cut -d: -f2); [ -r \"\$A\" ] || A=$DIR/shadowtrackpad.dex; CLASSPATH=\$A app_process / local.shadowtrackpad.Main $*" 2>&1) || true
+    if [ -z "$out" ]; then echo "The helper didn't answer (is it running? try: shadow-trackpad status)"; return 1; fi
+    echo "$out"
+}
+
+# Before the paired key is sent anywhere: the device must prove it is this Googlebook with the
+# Shadow Trackpad Fix app holding that key (a look-alike adb service can't answer this).
+verify_device() {
+    [ -f "$KEYDIR/provisioned" ] || return 0   # very first setup: nothing to check against yet
+    if [ "$FORCE" = 1 ]; then echo "(--force: device check skipped)"; return 0; fi
+    local k nonce res
+    k=$(key_secret) || { echo "No paired key in $KEYDIR." >&2; return 1; }
+    nonce=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    challenge() { ash "am broadcast --user $USER_ID -n $APP/.ControlReceiver -a local.shadowtrackpadfix.CONFIG --es challenge $nonce" 2>/dev/null | tail -1; }
+    res=$(challenge)
+    if [[ "$res" != *proof=* ]]; then
+        # No answer: Android may block the app's background start until it is opened once.
+        ash "am start --user $USER_ID -n $APP/.MainActivity" >/dev/null 2>&1; sleep 4
+        ash "am start --user $USER_ID -n com.android.virtualization.terminal/.new2.ui.MainActivity" >/dev/null 2>&1
+        res=$(challenge)
+    fi
+    [[ "$res" == *"proof=$(hmac_hex "$k" "challenge:$nonce")"* ]] && return 0
+    echo "The device at $DEV could not prove it is your Googlebook with the Shadow Trackpad Fix app" >&2
+    echo "(answer: ${res:-none}). Nothing was sent. If you reinstalled the app or cleared its data," >&2
+    echo "run the same command again with --force." >&2
+    return 1
+}
+
+provision() {
+    ash "am broadcast --user $USER_ID -n $APP/.ControlReceiver -a local.shadowtrackpadfix.PROVISION --es p12 $(base64 -w0 "$KEYDIR/key.p12") --es pass shadowtrackpadfix" | tail -1
+}
+
+push_script() {
+    ash "mkdir -p $DIR"
+    adb -s "$DEV" push "$HELPER_SRC/device/start.sh" "$DIR/start.sh" >/dev/null
+}
+
+case "${1:-status}" in
+    connect)
+        if [ -n "${2:-}" ]; then adb connect "$2"; else need_device; echo "connected: $DEV"; fi
+        ;;
+    start|stop|restart)
+        need_device
+        push_script
+        tell_app() { ash "am broadcast --user $USER_ID -n $APP/.ControlReceiver -a local.shadowtrackpadfix.CONFIG --ez stopped $1" >/dev/null 2>&1 || true; }
+        if [ "$1" = stop ]; then
+            # Tell the app first, so one of its automatic checks can't start the helper again.
+            tell_app true
+            ash "sh $DIR/start.sh stop"
+        else
+            [ "$1" = restart ] && { ash "sh $DIR/start.sh stop" >/dev/null; sleep 1; }
+            ash "sh $DIR/start.sh start"
+            tell_app false
+        fi
+        ;;
+    status)
+        need_device
+        ash "sh $DIR/start.sh status"
+        ;;
+    pause|resume|verbose|reload)
+        need_device
+        helper "$1"
+        ;;
+    log)
+        need_device
+        if [ "${2:-}" = "-f" ]; then ash "tail -n 40 -F $DIR/daemon.log"; else ash "tail -n 60 $DIR/daemon.log"; fi
+        ;;
+    set)
+        need_device
+        [ -n "${2:-}" ] && [ -n "${3:-}" ] || { echo "usage: shadow-trackpad set KEY VALUE"; exit 1; }
+        case "$2" in
+            packages|pointer_speed|scroll_speed|scroll_mode|low_latency|momentum|flick_boost|momentum_friction|pinch_speed|natural_scroll|tap_to_click|tap_drag|gestures|typing_tap_block_ms|scroll_hold_ms) ;;
+            *) echo "Unknown setting '$2' (see: shadow-trackpad config)"; exit 1 ;;
+        esac
+        [[ "$3" =~ ^[A-Za-z0-9.,_-]+$ ]] || { echo "Invalid value '$3' (letters, digits, . , _ - only)"; exit 1; }
+        ash "touch $DIR/config.properties; grep -v '^$2=' $DIR/config.properties > $DIR/config.tmp; echo '$2=$3' >> $DIR/config.tmp; mv $DIR/config.tmp $DIR/config.properties"
+        echo "Set $2=$3 (applies within 2 seconds)."
+        ;;
+    config)
+        need_device
+        ash "cat $DIR/config.properties 2>/dev/null || echo '(no settings file yet, so the defaults apply)'"
+        cat <<'EOF'
+
+Settings (shadow-trackpad set KEY VALUE):
+  pointer_speed      cursor speed multiplier            (default 1.0)
+  scroll_speed       two-finger scroll speed multiplier (default 1.0)
+  scroll_mode        smooth (fine-grained, default) / notch (instant whole mouse-wheel notches)
+  low_latency        hand each move to Shadow at once instead of at the next frame (default true)
+  momentum           flick keeps scrolling: true/false  (default true)
+  flick_boost        flick glide speed vs. finger speed (default 1.25; higher = faster flicks)
+  momentum_friction  how long a flick glides, seconds   (default 0.28; higher = longer)
+  pinch_speed        pinch-zoom speed multiplier        (default 1.0)
+  natural_scroll     auto / true / false                (auto = your Android trackpad setting)
+  tap_to_click       auto / true / false
+  tap_drag           auto / true / false
+  gestures           pinch-zoom + 3/4-finger swipes     (default true)
+  typing_tap_block_ms ignore taps this long after typing (default 400)
+EOF
+        ;;
+    nettest)
+        need_device
+        echo "== Helper latency (this session) =="
+        helper status | grep -E 'trackpad->|processing' || true
+        echo
+        python3 -I "$TOOLS/nettest.py" "$DEV"
+        ;;
+    doctor)
+        need_device
+        exec python3 -I "$TOOLS/doctor.py" "$DEV"
+        ;;
+    pair)
+        # Re-pairs the app's own adb key ("ShadowTrackpadFix@googlebook") and installs it in the app.
+        need_device
+        echo "On the Googlebook: Settings > System > Developer options > Wireless debugging >"
+        echo "  'Pair device with pairing code'. Keep that dialog open."
+        read -rp "Pairing code: " code
+        read -rp "IP address & port shown in the dialog (e.g. 192.0.2.10:37123): " addr
+        H=$HOME/.config/shadow-trackpad/pairhome
+        mkdir -p "$H/.android" "$KEYDIR" && chmod 700 "$H" "$H/.android" "$KEYDIR"
+        if [ ! -f "$KEYDIR/adbkey" ]; then
+            adb keygen "$KEYDIR/adbkey" >/dev/null 2>&1
+            echo "$(awk '{print $1}' "$KEYDIR/adbkey.pub") ShadowTrackpadFix@googlebook" > "$KEYDIR/adbkey.pub"
+        fi
+        cp "$KEYDIR/adbkey" "$KEYDIR/adbkey.pub" "$H/.android/" && chmod 600 "$H/.android/adbkey"
+        # Always shut the temporary adb server down, whatever happens below.
+        trap 'HOME=$H ANDROID_ADB_SERVER_PORT=5038 adb kill-server >/dev/null 2>&1 || true' EXIT
+        result=$(HOME=$H ANDROID_ADB_SERVER_PORT=5038 timeout 40 adb pair "$addr" "$code" 2>&1 || true)
+        echo "$result"
+        [[ "$result" == *"Successfully paired"* ]] || { echo "Pairing failed, and nothing was changed. Try again with a fresh code."; exit 1; }
+        openssl req -new -x509 -key "$KEYDIR/adbkey" -out "$KEYDIR/cert.pem" -days 36500 -subj /CN=ShadowTrackpadFix 2>/dev/null
+        openssl pkcs12 -export -inkey "$KEYDIR/adbkey" -in "$KEYDIR/cert.pem" -out "$KEYDIR/key.p12" -passout pass:shadowtrackpadfix 2>/dev/null
+        chmod 600 "$KEYDIR/key.p12" "$KEYDIR/cert.pem"
+        verify_device || exit 1
+        res=$(provision)
+        echo "$res"
+        [[ "$res" == *provisioned* ]] && touch "$KEYDIR/provisioned"
+        ;;
+    install-app)
+        need_device
+        code=$(( $(date +%s) / 60 ))   # always increasing version code
+        VERSION_CODE=$code VERSION_NAME="1.$code" "$APP_SRC/build.sh" | tail -1
+        adb -s "$DEV" install -r --user $USER_ID "$APP_SRC/ShadowTrackpadFix.apk" | tail -1
+        for perm in android.permission.WRITE_SECURE_SETTINGS android.permission.POST_NOTIFICATIONS android.permission.ACCESS_LOCAL_NETWORK; do
+            ash "pm grant --user $USER_ID $APP $perm" 2>/dev/null || true
+        done
+        ash "pm set-permission-flags --user $USER_ID $APP android.permission.POST_NOTIFICATIONS user-set user-fixed; pm set-permission-flags --user $USER_ID $APP android.permission.ACCESS_LOCAL_NETWORK user-set user-fixed; appops set --user $USER_ID $APP AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore; appops set --user $USER_ID $APP RUN_ANY_IN_BACKGROUND allow; cmd deviceidle whitelist +$APP" >/dev/null
+        if [ -f "$KEYDIR/key.p12" ]; then
+            verify_device || exit 1
+            res=$(provision)
+            if [[ "$res" != *provisioned* ]]; then
+                # The app didn't answer - e.g. Android blocks background starts of an app that crashed
+                # repeatedly until it is opened once. Open it (that lifts the block) and retry.
+                echo "App didn't respond ($res). Opening it once to clear Android's background-start block..."
+                ash "am start --user $USER_ID -n $APP/.MainActivity" >/dev/null 2>&1; sleep 4
+                ash "am start --user $USER_ID -n com.android.virtualization.terminal/.new2.ui.MainActivity" >/dev/null 2>&1
+                res=$(provision)
+            fi
+            echo "$res"
+            [[ "$res" == *provisioned* ]] && touch "$KEYDIR/provisioned"
+        else
+            echo "No paired key in $KEYDIR. Pair one first."
+        fi
+        # Granting permissions above restarts the app's process, which can cut short the restart it
+        # scheduled on update - so ask for the restart explicitly now.
+        ash "am broadcast --user $USER_ID -n $APP/.ControlReceiver -a local.shadowtrackpadfix.KICK --ez restart true" >/dev/null
+        ;;
+    *)
+        sed -n '2,/^set -euo/p' "$0" | grep '^#'
+        exit 1
+        ;;
+esac
