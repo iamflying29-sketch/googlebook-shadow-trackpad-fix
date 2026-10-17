@@ -267,8 +267,9 @@ No root is needed. Everything uses the permissions that the adb shell user alrea
    On the Googlebook, open **Settings > System > Developer options > Wireless debugging > Pair device with pairing
    code** and keep the dialog open. Type the six-digit code and the IP address and port from that dialog when the
    command asks for them. The command creates a dedicated key in `~/.config/shadow-trackpad/adbhome`, pairs it through
-   a temporary adb server that it shuts down afterwards, and hands the key to the app. The pairing shows up as
-   `ShadowTrackpadFix@googlebook` under **Paired devices**. Within a minute or so, the app starts the helper.
+   a temporary adb server that it shuts down afterwards, and hands the key to the app. The pairing shows up under
+   **Paired devices** with the Linux Terminal's own name (for example `droid@debian`), the same label as the Terminal's
+   pairing, because adb sends that name; it is a separate key all the same. Within a minute or so, the app starts the helper.
 
    **Keep the pairing: turn on "Disable adb authorization timeout"** on the same Developer options screen and leave
    it on. Without it, Android silently forgets every Wireless debugging pairing that has not connected for 7 days.
@@ -479,7 +480,7 @@ adb logcat -s TrackpadProbe:I
    ```
 
 4. On the Googlebook, open **Settings > System > Developer options > Wireless debugging > Paired devices** and forget
-   `ShadowTrackpadFix@googlebook`. With the Files app, delete `adb-port.txt` (and any numbered copy such as
+   the app's entry (it shows the Terminal's name, for example `droid@debian`, like the Terminal's own pairing; the key file is labeled `ShadowTrackpadFix@googlebook`). With the Files app, delete `adb-port.txt` (and any numbered copy such as
    `adb-port (1).txt`) from `Documents/Shadow Trackpad Fix`.
    Turn off USB debugging and Wireless debugging if you only turned them on for this project.
 
