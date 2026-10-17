@@ -270,6 +270,13 @@ No root is needed. Everything uses the permissions that the adb shell user alrea
    a temporary adb server that it shuts down afterwards, and hands the key to the app. The pairing shows up as
    `ShadowTrackpadFix@googlebook` under **Paired devices**. Within a minute or so, the app starts the helper.
 
+   **Keep the pairing: turn on "Disable adb authorization timeout"** on the same Developer options screen and leave
+   it on. Without it, Android silently forgets every Wireless debugging pairing that has not connected for 7 days.
+   On 2026-10-17 that removed this app's key (and Sleep Guard's) after exactly 7 days, the helper could no longer be
+   started, and nothing had warned me. Since that day the `shadow-trackpad` command switches the timeout off by itself
+   whenever its connection works (one short `settings put global adb_allowed_connection_time 0`), and
+   `shadow-trackpad pair` is the way back if the pairing has already been lost.
+
 9. **Check that it runs.**
 
    ```bash
